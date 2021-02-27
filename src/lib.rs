@@ -16,11 +16,12 @@ pub fn invoke<'f, T: 'f, F: FnOnce() -> T + 'f>(mode: &Mode<T>, task: F) -> T {
 
 pub struct Sentinel<'a, I: Invoker + ?Sized> {
     invoker_ref: &'a I,
+    cancelled: bool,
 }
 
 impl<I: Invoker + ?Sized> Drop for Sentinel<'_, I> {
     fn drop(&mut self) {
-        if std::thread::panicking() {
+        if !self.cancelled {
             self.invoker_ref.post_invoke();
         }
     }
@@ -44,12 +45,26 @@ pub trait Invoker {
     ) -> T {
         self.pre_invoke();
 
-        let _sentinel = if self.invoke_post_invoke_on_panic() {
-            Some(Sentinel { invoker_ref: self })
-        } else {
-            None
-        };
+        if self.invoke_post_invoke_on_panic() {
+            let mut sentinel = Sentinel {
+                invoker_ref: self,
+                cancelled: false,
+            };
 
+            let result = self.do_invoke(mode, task);
+
+            sentinel.cancelled = true;
+            self.post_invoke();
+            result
+        } else {
+            let result = self.do_invoke(mode, task);
+
+            self.post_invoke();
+            result
+        }
+    }
+
+    fn do_invoke<'f, T: 'f, F: FnOnce() -> T + 'f>(&self, mode: Option<&Mode<T>>, task: F) -> T {
         if let Some(mode) = mode {
             invoke(mode, task)
         } else {
@@ -223,7 +238,8 @@ mod tests {
         Arc,
     };
 
-    static COUNTER: AtomicU16 = AtomicU16::new(1);
+    static PRE_COUNTER: AtomicU16 = AtomicU16::new(1);
+    static POST_COUNTER: AtomicU16 = AtomicU16::new(1);
 
     struct MultiplyTwoMode {}
     impl ModeWrapper<i32> for MultiplyTwoMode {
@@ -252,14 +268,22 @@ mod tests {
     struct CounterInvoker {}
     impl Invoker for CounterInvoker {
         fn pre_invoke(&self) {
-            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            PRE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        }
+        fn post_invoke(&self) {
+            POST_COUNTER.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     struct MultInvoker {}
     impl Invoker for MultInvoker {
         fn pre_invoke(&self) {
-            COUNTER
+            PRE_COUNTER
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| Some(x * 2))
+                .unwrap();
+        }
+        fn post_invoke(&self) {
+            POST_COUNTER
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| Some(x * 2))
                 .unwrap();
         }
@@ -272,16 +296,23 @@ mod tests {
     }
 
     #[test]
-    fn test_invoker() {
+    fn test_combined_invoker() {
         let invoker = CounterInvoker {}
             .and_then(MultInvoker {})
             .and_then(MultInvoker {})
             .and_then(CounterInvoker {});
+
         invoker.invoke(|| {
-            COUNTER
+            PRE_COUNTER
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| Some(x * 3))
+                .unwrap();
+
+            POST_COUNTER
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| Some(x * 3))
                 .unwrap();
         });
-        assert_eq!(COUNTER.load(Ordering::Relaxed), 27);
+
+        assert_eq!(PRE_COUNTER.load(Ordering::Relaxed), 27);
+        assert_eq!(POST_COUNTER.load(Ordering::Relaxed), 17);
     }
 }
