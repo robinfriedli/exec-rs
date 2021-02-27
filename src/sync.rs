@@ -156,17 +156,16 @@ where
         let mut expected = curr;
 
         loop {
-            let witnessed = self
-                .rc
-                .compare_and_swap(expected, expected + 1, Ordering::Relaxed);
-
-            if witnessed == expected {
-                break witnessed;
-            } else if witnessed == 0 {
-                break witnessed;
+            match self.rc.compare_exchange_weak(
+                expected,
+                expected + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(witnessed) => break witnessed,
+                Err(witnessed) if witnessed == 0 => break witnessed,
+                Err(witnessed) => expected = witnessed,
             }
-
-            expected = witnessed;
         }
     }
 
