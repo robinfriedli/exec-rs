@@ -155,7 +155,7 @@ pub trait ModeCombiner<T: 'static> {
 
     fn set_outer(&mut self, outer: Arc<dyn ModeCombiner<T>>);
 
-    fn iter<'a>(&'a self) -> ModeCombinerIterator<'a, T>;
+    fn iter(&self) -> ModeCombinerIterator<T>;
 
     fn wrapper_ref(&self) -> Arc<dyn ModeWrapper<T>>;
 }
