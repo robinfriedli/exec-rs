@@ -34,7 +34,7 @@ pub trait Invoker {
         self.invoke_with_mode_optional(Some(mode), task)
     }
 
-    fn invoke<'f, T: 'static, F: FnOnce() -> T + 'f>(&self, task: F) -> T {
+    fn invoke<'f, T: 'f, F: FnOnce() -> T + 'f>(&self, task: F) -> T {
         self.invoke_with_mode_optional(None, task)
     }
 
@@ -112,18 +112,18 @@ impl<O: Invoker, I: Invoker> Invoker for CombinedInvoker<O, I> {
     }
 }
 
-pub struct Mode<T: 'static> {
-    mode_combiner: Option<Box<dyn ModeCombiner<T>>>,
+pub struct Mode<'m, T: 'm> {
+    mode_combiner: Option<Box<dyn ModeCombiner<'m, T> + 'm>>,
 }
 
-impl<T: 'static> Mode<T> {
+impl<'m, T: 'm> Mode<'m, T> {
     pub fn new() -> Self {
         Self {
             mode_combiner: None,
         }
     }
 
-    pub fn with<M: ModeWrapper<T> + 'static>(mut self, mode_wrapper: M) -> Self {
+    pub fn with<M: ModeWrapper<'m, T> + 'm>(mut self, mode_wrapper: M) -> Self {
         if let Some(curr_combiner) = self.mode_combiner {
             self.mode_combiner = Some(curr_combiner.combine(mode_wrapper.into_combiner()));
         } else {
@@ -134,12 +134,18 @@ impl<T: 'static> Mode<T> {
     }
 }
 
-pub trait ModeWrapper<T: 'static> {
+impl<'m, T: 'm> Default for Mode<'m, T> {
+    fn default() -> Self {
+        Mode::new()
+    }
+}
+
+pub trait ModeWrapper<'m, T: 'm> {
     fn wrap<'f>(self: Arc<Self>, task: Box<dyn FnOnce() -> T + 'f>) -> Box<dyn FnOnce() -> T + 'f>;
 
-    fn into_combiner(self) -> Box<dyn ModeCombiner<T>>
+    fn into_combiner(self) -> Box<dyn ModeCombiner<'m, T> + 'm>
     where
-        Self: Sized + 'static,
+        Self: Sized + 'm,
     {
         Box::new(DelegatingModeCombiner {
             wrapper: Arc::new(self),
@@ -148,24 +154,27 @@ pub trait ModeWrapper<T: 'static> {
     }
 }
 
-pub trait ModeCombiner<T: 'static> {
-    fn combine(&self, other: Box<dyn ModeCombiner<T>>) -> Box<dyn ModeCombiner<T>>;
+pub trait ModeCombiner<'m, T: 'm> {
+    fn combine(
+        &self,
+        other: Box<dyn ModeCombiner<'m, T> + 'm>,
+    ) -> Box<dyn ModeCombiner<'m, T> + 'm>;
 
-    fn get_outer(&self) -> Option<&dyn ModeCombiner<T>>;
+    fn get_outer(&self) -> Option<&dyn ModeCombiner<'m, T>>;
 
-    fn set_outer(&mut self, outer: Arc<dyn ModeCombiner<T>>);
+    fn set_outer(&mut self, outer: Arc<dyn ModeCombiner<'m, T> + 'm>);
 
-    fn iter(&self) -> ModeCombinerIterator<T>;
+    fn iter<'a>(&'a self) -> ModeCombinerIterator<'a, 'm, T>;
 
-    fn wrapper_ref(&self) -> Arc<dyn ModeWrapper<T>>;
+    fn wrapper_ref(&self) -> Arc<dyn ModeWrapper<'m, T> + 'm>;
 }
 
-pub struct DelegatingModeCombiner<T> {
-    wrapper: Arc<dyn ModeWrapper<T>>,
-    outer: Option<Arc<dyn ModeCombiner<T>>>,
+pub struct DelegatingModeCombiner<'m, T> {
+    wrapper: Arc<dyn ModeWrapper<'m, T> + 'm>,
+    outer: Option<Arc<dyn ModeCombiner<'m, T> + 'm>>,
 }
 
-impl<T: 'static> Clone for DelegatingModeCombiner<T> {
+impl<T> Clone for DelegatingModeCombiner<'_, T> {
     fn clone(&self) -> Self {
         DelegatingModeCombiner {
             wrapper: self.wrapper.clone(),
@@ -174,14 +183,17 @@ impl<T: 'static> Clone for DelegatingModeCombiner<T> {
     }
 }
 
-impl<T: 'static> ModeCombiner<T> for DelegatingModeCombiner<T> {
-    fn combine(&self, mut other: Box<dyn ModeCombiner<T>>) -> Box<dyn ModeCombiner<T>> {
+impl<'m, T> ModeCombiner<'m, T> for DelegatingModeCombiner<'m, T> {
+    fn combine(
+        &self,
+        mut other: Box<dyn ModeCombiner<'m, T> + 'm>,
+    ) -> Box<dyn ModeCombiner<'m, T> + 'm> {
         let clone = self.clone();
         other.set_outer(Arc::new(clone));
         other
     }
 
-    fn get_outer(&self) -> Option<&dyn ModeCombiner<T>> {
+    fn get_outer(&self) -> Option<&dyn ModeCombiner<'m, T>> {
         if let Some(ref outer) = self.outer {
             Some(outer.as_ref())
         } else {
@@ -189,29 +201,29 @@ impl<T: 'static> ModeCombiner<T> for DelegatingModeCombiner<T> {
         }
     }
 
-    fn set_outer(&mut self, outer: Arc<dyn ModeCombiner<T>>) {
+    fn set_outer(&mut self, outer: Arc<dyn ModeCombiner<'m, T> + 'm>) {
         self.outer = Some(outer);
     }
 
-    fn iter(&self) -> ModeCombinerIterator<T> {
+    fn iter<'a>(&'a self) -> ModeCombinerIterator<'a, 'm, T> {
         ModeCombinerIterator {
             mode_combiner: self,
             curr_combiner: None,
         }
     }
 
-    fn wrapper_ref(&self) -> Arc<dyn ModeWrapper<T>> {
+    fn wrapper_ref(&self) -> Arc<dyn ModeWrapper<'m, T> + 'm> {
         self.wrapper.clone()
     }
 }
 
-pub struct ModeCombinerIterator<'a, T> {
-    mode_combiner: &'a dyn ModeCombiner<T>,
-    curr_combiner: Option<&'a dyn ModeCombiner<T>>,
+pub struct ModeCombinerIterator<'a, 'm, T: 'm> {
+    mode_combiner: &'a dyn ModeCombiner<'m, T>,
+    curr_combiner: Option<&'a dyn ModeCombiner<'m, T>>,
 }
 
-impl<'a, T: 'static> Iterator for ModeCombinerIterator<'a, T> {
-    type Item = &'a dyn ModeCombiner<T>;
+impl<'a, 'm, T: 'm> Iterator for ModeCombinerIterator<'a, 'm, T> {
+    type Item = &'a dyn ModeCombiner<'m, T>;
 
     fn next(&mut self) -> Option<<Self as Iterator>::Item> {
         if let Some(curr_wrapper) = self.curr_combiner {
@@ -242,7 +254,7 @@ mod tests {
     static POST_COUNTER: AtomicU16 = AtomicU16::new(1);
 
     struct MultiplyTwoMode {}
-    impl ModeWrapper<i32> for MultiplyTwoMode {
+    impl ModeWrapper<'static, i32> for MultiplyTwoMode {
         fn wrap<'f>(
             self: Arc<Self>,
             task: Box<(dyn FnOnce() -> i32 + 'f)>,
@@ -254,7 +266,7 @@ mod tests {
     }
 
     struct AddTwoMode {}
-    impl ModeWrapper<i32> for AddTwoMode {
+    impl ModeWrapper<'static, i32> for AddTwoMode {
         fn wrap<'f>(
             self: Arc<Self>,
             task: Box<(dyn FnOnce() -> i32 + 'f)>,

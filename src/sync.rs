@@ -34,7 +34,7 @@ where
     mutex_sync: MutexSync<K>,
 }
 
-impl<T, K> ModeWrapper<T> for MutexSyncMode<K>
+impl<T, K> ModeWrapper<'static, T> for MutexSyncMode<K>
 where
     T: 'static,
     K: 'static + Sync + Send + Clone + Hash + Ord,
