@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use crate::ModeWrapper;
+use crate::{Invoker, ModeWrapper};
 
 pub struct MutexSync<K>
 where
@@ -23,27 +23,6 @@ where
         MutexSync {
             mutex_map: flurry::HashMap::new(),
         }
-    }
-}
-
-pub struct MutexSyncMode<K>
-where
-    K: 'static + Sync + Send + Clone + Hash + Ord,
-{
-    key: K,
-    mutex_sync: MutexSync<K>,
-}
-
-impl<T, K> ModeWrapper<'static, T> for MutexSyncMode<K>
-where
-    T: 'static,
-    K: 'static + Sync + Send + Clone + Hash + Ord,
-{
-    fn wrap<'f>(
-        self: Arc<Self>,
-        task: Box<(dyn FnOnce() -> T + 'f)>,
-    ) -> Box<(dyn FnOnce() -> T + 'f)> {
-        Box::new(move || self.mutex_sync.evaluate(self.key.clone(), task))
     }
 }
 
@@ -178,12 +157,57 @@ where
     }
 }
 
+pub struct MutexSyncExecutor<K, M>
+where
+    K: 'static + Sync + Send + Clone + Hash + Ord,
+    M: std::borrow::Borrow<MutexSync<K>> + 'static,
+{
+    key: K,
+    mutex_sync: M,
+}
+
+impl<T, K, M> ModeWrapper<'static, T> for MutexSyncExecutor<K, M>
+where
+    T: 'static,
+    K: 'static + Sync + Send + Clone + Hash + Ord,
+    M: std::borrow::Borrow<MutexSync<K>> + 'static,
+{
+    fn wrap<'f>(
+        self: Arc<Self>,
+        task: Box<(dyn FnOnce() -> T + 'f)>,
+    ) -> Box<(dyn FnOnce() -> T + 'f)> {
+        Box::new(move || self.mutex_sync.borrow().evaluate(self.key.clone(), task))
+    }
+}
+
+impl<K, M> Invoker for MutexSyncExecutor<K, M>
+where
+    K: 'static + Sync + Send + Clone + Hash + Ord,
+    M: std::borrow::Borrow<MutexSync<K>> + 'static,
+{
+    fn do_invoke<'f, T: 'f, F: FnOnce() -> T + 'f>(
+        &self,
+        mode: Option<&super::Mode<T>>,
+        task: F,
+    ) -> T {
+        self.mutex_sync.borrow().evaluate(self.key.clone(), || {
+            if let Some(mode) = mode {
+                super::invoke(mode, task)
+            } else {
+                task()
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
-    use super::MutexSync;
+    use crate::Invoker;
+
+    use super::{MutexSync, MutexSyncExecutor};
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI32, Ordering},
         Arc,
     };
 
@@ -283,6 +307,91 @@ mod tests {
             });
         });
         handles.push(handle2);
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(failed.load(Ordering::Relaxed), false);
+    }
+
+    #[test]
+    fn test_mutex_sync_executor() {
+        let mutex_sync = Arc::new(MutexSync::<i32>::new());
+        let failed = Arc::new(AtomicBool::new(false));
+        let running_set = Arc::new(flurry::HashSet::<i32>::new());
+        let multiplier_map = Arc::new(flurry::HashMap::<i32, AtomicI32>::new());
+
+        {
+            let map = multiplier_map.pin();
+            for i in 0..5 {
+                map.insert(i, AtomicI32::new(0));
+            }
+        }
+
+        let mutex_sync_executor = MutexSyncExecutor {
+            key: 1,
+            mutex_sync: MutexSync::<i32>::new(),
+        };
+
+        assert_eq!(mutex_sync_executor.invoke(|| 4), 4);
+
+        let mut handles = Vec::with_capacity(25);
+
+        for _ in 0..5 {
+            for i in 0..5 {
+                let failed = failed.clone();
+                let failed2 = failed.clone();
+                let running_set = running_set.clone();
+                let multiplier_map = multiplier_map.clone();
+
+                let executor = MutexSyncExecutor {
+                    key: i,
+                    mutex_sync: mutex_sync.clone(),
+                };
+
+                let handle = std::thread::spawn(move || {
+                    let running_set = running_set.pin();
+                    executor.invoke(move || {
+                        if running_set.contains(&i) {
+                            failed.store(true, Ordering::Relaxed);
+                        }
+
+                        running_set.insert(i);
+
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+
+                        if !running_set.contains(&i) {
+                            failed.store(true, Ordering::Relaxed);
+                        }
+
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        running_set.remove(&i);
+
+                        if running_set.contains(&i) {
+                            failed.store(true, Ordering::Relaxed);
+                        }
+                    });
+
+                    let mode = crate::Mode::<i32>::new().with(executor);
+                    let result = crate::invoke(&mode, || {
+                        let multiplier_map = multiplier_map.pin();
+                        let multiplier = multiplier_map.get(&i).unwrap();
+                        multiplier.store(2, Ordering::Relaxed);
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        let result = multiplier.load(Ordering::Relaxed) * 4;
+                        multiplier.store(0, Ordering::Relaxed);
+                        result
+                    });
+
+                    if result != 8 {
+                        failed2.store(true, Ordering::Relaxed);
+                    }
+                });
+
+                handles.push(handle);
+            }
+        }
 
         for handle in handles {
             handle.join().unwrap();
