@@ -3,7 +3,7 @@ use std::sync::Arc;
 #[cfg(feature = "sync")]
 pub mod sync;
 
-pub fn invoke<'f, T: 'f, F: FnOnce() -> T + 'f>(mode: &Mode<T>, task: F) -> T {
+pub fn invoke<'f, T: 'f, F: FnOnce() -> T + 'f>(mode: &Mode<'f, T>, task: F) -> T {
     let mut task: Box<dyn FnOnce() -> T + 'f> = Box::new(task);
     if let Some(ref mode_combiner) = mode.mode_combiner {
         for mode_wrapper in mode_combiner.iter() {
@@ -30,17 +30,21 @@ impl<I: Invoker + ?Sized> Drop for Sentinel<'_, I> {
 pub trait Invoker {
     fn pre_invoke(&self) {}
 
-    fn invoke_with_mode<'f, T: 'f, F: FnOnce() -> T + 'f>(&self, mode: &Mode<T>, task: F) -> T {
+    fn invoke_with_mode<'f, T: 'f, F: FnOnce() -> T + 'f>(
+        &'f self,
+        mode: &'f Mode<'f, T>,
+        task: F,
+    ) -> T {
         self.invoke_with_mode_optional(Some(mode), task)
     }
 
-    fn invoke<'f, T: 'f, F: FnOnce() -> T + 'f>(&self, task: F) -> T {
+    fn invoke<'f, T: 'f, F: FnOnce() -> T + 'f>(&'f self, task: F) -> T {
         self.invoke_with_mode_optional(None, task)
     }
 
     fn invoke_with_mode_optional<'f, T: 'f, F: FnOnce() -> T + 'f>(
-        &self,
-        mode: Option<&Mode<T>>,
+        &'f self,
+        mode: Option<&'f Mode<'f, T>>,
         task: F,
     ) -> T {
         self.pre_invoke();
@@ -64,7 +68,11 @@ pub trait Invoker {
         }
     }
 
-    fn do_invoke<'f, T: 'f, F: FnOnce() -> T + 'f>(&self, mode: Option<&Mode<T>>, task: F) -> T {
+    fn do_invoke<'f, T: 'f, F: FnOnce() -> T + 'f>(
+        &'f self,
+        mode: Option<&'f Mode<'f, T>>,
+        task: F,
+    ) -> T {
         if let Some(mode) = mode {
             invoke(mode, task)
         } else {
@@ -103,12 +111,13 @@ impl<O: Invoker, I: Invoker> CombinedInvoker<O, I> {
 
 impl<O: Invoker, I: Invoker> Invoker for CombinedInvoker<O, I> {
     fn invoke_with_mode_optional<'f, T: 'f, F: FnOnce() -> T + 'f>(
-        &self,
-        mode: Option<&Mode<T>>,
+        &'f self,
+        mode: Option<&'f Mode<'f, T>>,
         task: F,
     ) -> T {
-        self.outer
-            .invoke_with_mode_optional(mode, || self.inner.invoke_with_mode_optional(mode, task))
+        self.outer.invoke_with_mode_optional(mode, move || {
+            self.inner.invoke_with_mode_optional(mode, task)
+        })
     }
 }
 
@@ -141,7 +150,7 @@ impl<'m, T: 'm> Default for Mode<'m, T> {
 }
 
 pub trait ModeWrapper<'m, T: 'm> {
-    fn wrap<'f>(self: Arc<Self>, task: Box<dyn FnOnce() -> T + 'f>) -> Box<dyn FnOnce() -> T + 'f>;
+    fn wrap(self: Arc<Self>, task: Box<dyn FnOnce() -> T + 'm>) -> Box<dyn FnOnce() -> T + 'm>;
 
     fn into_combiner(self) -> Box<dyn ModeCombiner<'m, T> + 'm>
     where
@@ -244,7 +253,7 @@ impl<'a, 'm, T: 'm> Iterator for ModeCombinerIterator<'a, 'm, T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{invoke, Invoker, Mode, ModeWrapper};
+    use crate::{invoke, Invoker, Mode, ModeCombinerIterator, ModeWrapper};
     use std::sync::{
         atomic::{AtomicU16, Ordering},
         Arc,
@@ -301,6 +310,31 @@ mod tests {
         }
     }
 
+    struct StringRefMode<'a> {
+        str_ref: &'a str,
+    }
+    impl<'a> ModeWrapper<'a, &'a str> for StringRefMode<'a> {
+        fn wrap(
+            self: Arc<Self>,
+            task: Box<(dyn FnOnce() -> &'a str + 'a)>,
+        ) -> Box<(dyn FnOnce() -> &'a str + 'a)> {
+            Box::new(move || {
+                task();
+                self.str_ref
+            })
+        }
+    }
+
+    struct ModeCombinerIteratorMode {}
+    impl<'a, 'm> ModeWrapper<'a, ModeCombinerIterator<'a, 'm, &'m str>> for ModeCombinerIteratorMode {
+        fn wrap(
+            self: Arc<Self>,
+            task: Box<dyn FnOnce() -> ModeCombinerIterator<'a, 'm, &'m str> + 'a>,
+        ) -> Box<dyn FnOnce() -> ModeCombinerIterator<'a, 'm, &'m str> + 'a> {
+            Box::new(move || task())
+        }
+    }
+
     #[test]
     fn it_works() {
         let mode = Mode::new().with(MultiplyTwoMode {}).with(AddTwoMode {});
@@ -326,5 +360,30 @@ mod tests {
 
         assert_eq!(PRE_COUNTER.load(Ordering::Relaxed), 27);
         assert_eq!(POST_COUNTER.load(Ordering::Relaxed), 17);
+    }
+
+    #[test]
+    fn test_lifetime_iterator() {
+        let s = String::from("test");
+        let m = StringRefMode { str_ref: &s };
+        let combiner = m.into_combiner();
+        let iter = combiner.iter();
+
+        let mode = Mode::new().with(ModeCombinerIteratorMode {});
+        let _iter = invoke(&mode, move || iter);
+    }
+
+    #[test]
+    fn test_lifetime_str_ref() {
+        let s = String::from("test");
+        let m = StringRefMode { str_ref: &s };
+
+        let mode = Mode::new().with(m);
+
+        {
+            assert_eq!("test", invoke(&mode, || { "fail" }));
+        }
+
+        assert_eq!("test", invoke(&mode, || { "fail" }));
     }
 }

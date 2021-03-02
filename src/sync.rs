@@ -187,7 +187,7 @@ where
 {
     fn do_invoke<'f, T: 'f, F: FnOnce() -> T + 'f>(
         &self,
-        mode: Option<&super::Mode<T>>,
+        mode: Option<&super::Mode<'f, T>>,
         task: F,
     ) -> T {
         self.mutex_sync.borrow().evaluate(self.key.clone(), || {
@@ -374,7 +374,7 @@ mod tests {
                     });
 
                     let mode = crate::Mode::<i32>::new().with(executor);
-                    let result = crate::invoke(&mode, || {
+                    let result = crate::invoke(&mode, move || {
                         let multiplier_map = multiplier_map.pin();
                         let multiplier = multiplier_map.get(&i).unwrap();
                         multiplier.store(2, Ordering::Relaxed);
