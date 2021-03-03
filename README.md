@@ -5,6 +5,21 @@ Rust port of the corresponding [kotlin lib](https://github.com/robinfriedli/exec
 Library that provides utility traits for task execution and, if the sync feature is enabled, the ability to synchronise
 tasks based on the value of a key.
 
+## Installation
+
+To add exec-rs to your project simply add the following Cargo dependency:
+```toml
+[dependencies]
+exec-rs = "0.1.0"
+```
+
+Or to exclude the "sync" feature:
+```toml
+[dependencies.exec-rs]
+version = "0.1.0"
+default-features = false
+```
+
 ## Executors
 
 Provides two different types that can manage task execution depending on the use case.
