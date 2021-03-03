@@ -453,4 +453,19 @@ mod tests {
 
         assert_eq!(failed.load(Ordering::Relaxed), false);
     }
+
+    #[test]
+    fn test_remove_mutex_on_panic() {
+        let mutex_sync = Arc::new(MutexSync::<i32>::new());
+
+        let m = mutex_sync.clone();
+        let handle = std::thread::spawn(move || {
+            m.evaluate(1, || {
+                panic!("test panic");
+            });
+        });
+
+        let _ = handle.join();
+        assert!(mutex_sync.mutex_map.is_empty());
+    }
 }

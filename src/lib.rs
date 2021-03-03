@@ -200,7 +200,7 @@ impl<O: Invoker, I: Invoker> Invoker for CombinedInvoker<O, I> {
 /// directly interact with the return value of the task. This also means that the lifetime of the
 /// Mode is tied to the lifetime of the type they are generic over.
 pub struct Mode<'m, T: 'm> {
-    mode_combiner: Option<Box<dyn ModeCombiner<'m, T> + 'm>>,
+    mode_combiner: Option<Box<dyn ModeCombiner<'m, T> + 'm + Send + Sync>>,
 }
 
 impl<'m, T: 'm> Mode<'m, T> {
@@ -220,7 +220,7 @@ impl<'m, T: 'm> Mode<'m, T> {
     /// of the `ModeWrapper` and sets the resulting [`ModeCombiner`](trait.ModeCombiner.html) on
     /// this Mode and, if there already is `ModeCombiner` present, combines the two by calling
     /// [`ModeCombiner::combine`](trait.ModeCombiner.html#method.combine) on the existing `ModeCombiner`.
-    pub fn with<M: ModeWrapper<'m, T> + 'm>(mut self, mode_wrapper: M) -> Self {
+    pub fn with<M: ModeWrapper<'m, T> + 'm + Send + Sync>(mut self, mode_wrapper: M) -> Self {
         if let Some(curr_combiner) = self.mode_combiner {
             self.mode_combiner = Some(curr_combiner.combine(mode_wrapper.into_combiner()));
         } else {
@@ -257,9 +257,9 @@ pub trait ModeWrapper<'m, T: 'm> {
     /// so that the iterator walks the `ModeCombiners` in the reverse order of which they were added, meaning
     /// the `ModeCombiner` that was added first ends up wrapping the task last, meaning its task will be the
     /// outermost task.
-    fn into_combiner(self) -> Box<dyn ModeCombiner<'m, T> + 'm>
+    fn into_combiner(self) -> Box<dyn ModeCombiner<'m, T> + 'm + Send + Sync>
     where
-        Self: Sized + 'm,
+        Self: Sized + Send + Sync + 'm,
     {
         Box::new(DelegatingModeCombiner {
             wrapper: Arc::new(self),
@@ -282,16 +282,16 @@ pub trait ModeCombiner<'m, T: 'm> {
     /// outermost task.
     fn combine(
         &self,
-        other: Box<dyn ModeCombiner<'m, T> + 'm>,
-    ) -> Box<dyn ModeCombiner<'m, T> + 'm>;
+        other: Box<dyn ModeCombiner<'m, T> + 'm + Send + Sync>,
+    ) -> Box<dyn ModeCombiner<'m, T> + 'm + Send + Sync>;
 
     /// Return the outer ModeCombiner this ModeCombiner delegates to, this is the next ModeCombiner
     /// the iterator returned by [`ModeCombiner::iter`](trait.ModeCombiner.html#method.iter) steps to.
-    fn get_outer(&self) -> Option<&dyn ModeCombiner<'m, T>>;
+    fn get_outer(&self) -> Option<&(dyn ModeCombiner<'m, T> + Send + Sync)>;
 
     /// Set the outer ModeCombiner this ModeCombiner delegates to, this is the next ModeCombiner
     /// the iterator returned by [`ModeCombiner::iter`](trait.ModeCombiner.html#method.iter) steps to.
-    fn set_outer(&mut self, outer: Arc<dyn ModeCombiner<'m, T> + 'm>);
+    fn set_outer(&mut self, outer: Arc<dyn ModeCombiner<'m, T> + 'm + Send + Sync>);
 
     /// Return an iterator that can unwrap combined ModeCombiners by stepping into the outer
     /// ModeCombiner recursively.
@@ -299,7 +299,7 @@ pub trait ModeCombiner<'m, T: 'm> {
 
     /// Reference the source [`ModeWrapper`](trait.ModeWrapper.html). Used to wrap the task when
     /// applying a [`Mode`](struct.Mode.html).
-    fn wrapper_ref(&self) -> Arc<dyn ModeWrapper<'m, T> + 'm>;
+    fn wrapper_ref(&self) -> Arc<dyn ModeWrapper<'m, T> + 'm + Send + Sync>;
 }
 
 /// Default implementation for the [`ModeWrapper`](trait.ModeWrapper.html) trait that combines `ModeCombiners` by
@@ -308,8 +308,8 @@ pub trait ModeCombiner<'m, T: 'm> {
 /// the `ModeCombiner` that was added first ends up wrapping the task last, meaning its task will be the
 /// outermost task.
 pub struct DelegatingModeCombiner<'m, T> {
-    wrapper: Arc<dyn ModeWrapper<'m, T> + 'm>,
-    outer: Option<Arc<dyn ModeCombiner<'m, T> + 'm>>,
+    wrapper: Arc<dyn ModeWrapper<'m, T> + 'm + Send + Sync>,
+    outer: Option<Arc<dyn ModeCombiner<'m, T> + 'm + Send + Sync>>,
 }
 
 impl<T> Clone for DelegatingModeCombiner<'_, T> {
@@ -324,14 +324,14 @@ impl<T> Clone for DelegatingModeCombiner<'_, T> {
 impl<'m, T> ModeCombiner<'m, T> for DelegatingModeCombiner<'m, T> {
     fn combine(
         &self,
-        mut other: Box<dyn ModeCombiner<'m, T> + 'm>,
-    ) -> Box<dyn ModeCombiner<'m, T> + 'm> {
+        mut other: Box<dyn ModeCombiner<'m, T> + 'm + Send + Sync>,
+    ) -> Box<dyn ModeCombiner<'m, T> + 'm + Send + Sync> {
         let clone = self.clone();
         other.set_outer(Arc::new(clone));
         other
     }
 
-    fn get_outer(&self) -> Option<&dyn ModeCombiner<'m, T>> {
+    fn get_outer(&self) -> Option<&(dyn ModeCombiner<'m, T> + Send + Sync)> {
         if let Some(ref outer) = self.outer {
             Some(outer.as_ref())
         } else {
@@ -339,7 +339,7 @@ impl<'m, T> ModeCombiner<'m, T> for DelegatingModeCombiner<'m, T> {
         }
     }
 
-    fn set_outer(&mut self, outer: Arc<dyn ModeCombiner<'m, T> + 'm>) {
+    fn set_outer(&mut self, outer: Arc<dyn ModeCombiner<'m, T> + 'm + Send + Sync>) {
         self.outer = Some(outer);
     }
 
@@ -350,7 +350,7 @@ impl<'m, T> ModeCombiner<'m, T> for DelegatingModeCombiner<'m, T> {
         }
     }
 
-    fn wrapper_ref(&self) -> Arc<dyn ModeWrapper<'m, T> + 'm> {
+    fn wrapper_ref(&self) -> Arc<dyn ModeWrapper<'m, T> + 'm + Send + Sync> {
         self.wrapper.clone()
     }
 }
@@ -523,5 +523,104 @@ mod tests {
             let str_ref = invoker.invoke(|| &shorter_lived_string);
             assert_eq!(str_ref, "test");
         }
+    }
+
+    #[test]
+    fn test_post_invoke_on_panic() {
+        struct TestPostInvoke {
+            counter: Arc<AtomicU16>,
+        }
+
+        impl Invoker for TestPostInvoke {
+            fn post_invoke(&self) {
+                self.counter.fetch_add(1, Ordering::Relaxed);
+            }
+
+            fn invoke_post_invoke_on_panic(&self) -> bool {
+                true
+            }
+        }
+
+        let counter = Arc::new(AtomicU16::new(0));
+
+        let test = TestPostInvoke {
+            counter: counter.clone(),
+        };
+
+        let handle = std::thread::spawn(move || {
+            test.invoke(|| {
+                panic!("test panic");
+            });
+        });
+
+        let _ = handle.join();
+
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_not_post_invoke_on_panic() {
+        struct TestPostInvoke {
+            counter: Arc<AtomicU16>,
+        }
+
+        impl Invoker for TestPostInvoke {
+            fn post_invoke(&self) {
+                self.counter.fetch_add(1, Ordering::Relaxed);
+            }
+
+            fn invoke_post_invoke_on_panic(&self) -> bool {
+                false
+            }
+        }
+
+        let counter = Arc::new(AtomicU16::new(0));
+
+        let test = TestPostInvoke {
+            counter: counter.clone(),
+        };
+
+        let handle = std::thread::spawn(move || {
+            test.invoke(|| {
+                panic!("test panic");
+            });
+        });
+
+        let _ = handle.join();
+
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_send_mode() {
+        struct MultiplierMode {
+            multiplier: u16,
+        }
+
+        impl ModeWrapper<'static, u16> for MultiplierMode {
+            fn wrap(
+                self: Arc<Self>,
+                task: Box<(dyn FnOnce() -> u16)>,
+            ) -> Box<(dyn FnOnce() -> u16)> {
+                Box::new(move || {
+                    return task() * self.multiplier;
+                })
+            }
+        }
+
+        let mode = Arc::new(Mode::new().with(MultiplierMode { multiplier: 4 }));
+        let result = Arc::new(AtomicU16::new(0));
+
+        let m = mode.clone();
+        let r = result.clone();
+        let handle = std::thread::spawn(move || {
+            let result = invoke(&m, || 5);
+
+            r.store(result, Ordering::Relaxed);
+        });
+
+        handle.join().unwrap();
+
+        assert_eq!(result.load(Ordering::Relaxed), 20);
     }
 }
