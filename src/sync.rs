@@ -8,6 +8,23 @@ use std::{
 
 use crate::{Invoker, ModeWrapper};
 
+/// Task executor that can synchronise tasks by value of a key provided when submitting a task.
+///
+/// For example, if i32 is used as key type, then tasks submitted with keys 3 and 5 may run concurrently
+/// but several tasks submitted with key 7 are synchronised by a mutex mapped to the key.
+///
+/// Manages a concurrent hash map that maps [`ReferenceCountedMutex`](struct.ReferenceCountedMutex.html)
+/// elements to the used keys. The [`ReferenceCountedMutex`](struct.ReferenceCountedMutex.html) struct
+/// holds a mutex used for synchronisation and removes itself from the map automatically if not used by
+/// any thread anymore by managing an atomic reference counter. If the counter is decremented from 1 to
+/// 0 the element is removed from the map and the counter cannot be incremented back up again. If the counter
+/// reached 0 future increments fail and a new `ReferenceCountedMutex` is created instead. When creating
+/// a new `ReferenceCountedMutex` and inserting it to the map fails because another thread has already
+/// created an element for the same key, the current thread tries to use the found existing element instead
+/// as long as its reference counter is valid (greater than 0), else it retries creating the element.
+///
+/// The type of the key used for synchronisation must be able to be used as a key for the map and thus
+/// must implement `Sync + Send + Clone + Hash + Ord` and have a static lifetime.
 pub struct MutexSync<K>
 where
     K: 'static + Sync + Send + Clone + Hash + Ord,
@@ -34,6 +51,24 @@ where
         Self::default()
     }
 
+    /// Submits a task for execution using the provided key for synchronisation. Uses the mutex of the
+    /// [`ReferenceCountedMutex`](struct.ReferenceCountedMutex.html) mapped to the key to synchronise
+    /// execution of the task. The `ReferenceCountedMutex` removes itself from the map automatically
+    /// as soon as no thread is using it anymore by managing an atomic reference counter.
+    ///
+    /// If the mutex map does not already contain an entry for the provided key, meaning no task is
+    /// currently running with a mutex mapped to the same key, the current thread attempts to insert
+    /// a new [`ReferenceCountedMutex`](struct.ReferenceCountedMutex.html), with an initial reference
+    /// count of 1, and if it succeeds acquires the mutex and runs the task, else it tries to use the
+    /// found existing `ReferenceCountedMutex` if its reference counter is valid (greater than 0) or
+    /// else retries creating the `ReferenceCountedMutex`.
+    ///
+    /// If the mutex map already contains a `ReferenceCountedMutex` mapped to the same key, meaning there
+    /// are threads running using the same key, the current thread attempts to increment the reference
+    /// counter on the found `ReferenceCountedMutex` and if it succeeds it waits to acquire the mutex and
+    /// then executes the task, if it fails, because the counter has been decremented to 0 because another
+    /// thread is in the process of removing the mutex from the map, it tries to create a new
+    /// `ReferenceCountedMutex`, same as above.
     pub fn evaluate<R, F: FnOnce() -> R>(&self, key: K, task: F) -> R {
         let mutex_map = self.mutex_map.pin();
 
@@ -83,6 +118,8 @@ where
     }
 }
 
+/// Type that manages decrementing the reference counter of the [`ReferenceCountedMutex`](struct.ReferenceCountedMutex.html)
+/// if execution of the task panics.
 struct Sentinel<'a, K>
 where
     K: 'static + Sync + Send + Clone + Hash + Ord,
@@ -103,6 +140,11 @@ where
     }
 }
 
+/// Struct that holds the mutex used for synchronisation and manages removing itself from the
+/// containing map once no longer referenced by any threads. Removes itself from the map when
+/// decrementing the counter from 1 to 0 and makes sure that the counter cannot be incremented
+/// back up once reaching 0 in case a thread finds a ReferenceCountedMutex that is in the
+/// process of being removed from the map.
 pub struct ReferenceCountedMutex<K>
 where
     K: 'static + Sync + Send + Clone + Hash + Ord,
@@ -116,6 +158,7 @@ impl<K> ReferenceCountedMutex<K>
 where
     K: 'static + Sync + Send + Clone + Hash + Ord,
 {
+    /// Create a new ReferenceCountedMutex with an initial reference count of 1.
     fn new(key: K) -> Self {
         ReferenceCountedMutex {
             key,
@@ -124,6 +167,8 @@ where
         }
     }
 
+    /// Attempts to increment the reference counter, failing to do so if it has reached 0 already.
+    /// Callers can check whether the increment succeed by checking whether the witnessed value is 0.
     fn increment_rc(&self) -> usize {
         let curr = self.rc.load(Ordering::Relaxed);
 
@@ -148,6 +193,12 @@ where
         }
     }
 
+    /// Decrements the reference counter, removing the entry from the map if the previous value was 0.
+    /// This is protected against race conditions since ReferenceCountedMutex elements cannot be used
+    /// anymore once the reference counter has reached 0, so even if some other thread might still
+    /// find this ReferenceCountedMutex in the map after this thread has decremented the rc to 0 but
+    /// before this thread removed the element from the map, the other thread will fail to increment
+    /// the reference counter and thus has to create a new ReferenceCountedMutex element.
     fn decrement_rc(&self, map_ref: &flurry::HashMapRef<K, ReferenceCountedMutex<K>>) {
         let curr = self.rc.fetch_sub(1, Ordering::Relaxed);
 
@@ -157,6 +208,9 @@ where
     }
 }
 
+/// Struct that implements the [`ModeWrapper`](trait.ModeWrapper.html) and [`Invoker`](trait.Invoker.html)
+/// traits for any type that borrows [`MutexSync`](struct.MutexSync.html) and a specific key. Enables using
+/// [`MutexSync`](struct.MutexSync.html) as a `ModeWrapper` or `Invoker`.
 pub struct MutexSyncExecutor<K, M>
 where
     K: 'static + Sync + Send + Clone + Hash + Ord,
@@ -186,8 +240,8 @@ where
     M: std::borrow::Borrow<MutexSync<K>> + 'static,
 {
     fn do_invoke<'f, T: 'f, F: FnOnce() -> T + 'f>(
-        &self,
-        mode: Option<&super::Mode<'f, T>>,
+        &'f self,
+        mode: Option<&'f super::Mode<'f, T>>,
         task: F,
     ) -> T {
         self.mutex_sync.borrow().evaluate(self.key.clone(), || {
