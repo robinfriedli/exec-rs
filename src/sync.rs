@@ -29,7 +29,7 @@ pub struct MutexSync<K>
 where
     K: 'static + Sync + Send + Clone + Hash + Ord,
 {
-    mutex_map: flurry::HashMap<K, ReferenceCountedMutex<K>>,
+    mutex_map: flurry::HashMap<K, ReferenceCountedMutex>,
 }
 
 impl<K> Default for MutexSync<K>
@@ -76,66 +76,34 @@ where
             if mutex.increment_rc() > 0 {
                 mutex
             } else {
-                Self::create_mutex(key, &mutex_map)
+                Self::create_mutex(&key, &mutex_map)
             }
         } else {
-            Self::create_mutex(key, &mutex_map)
+            Self::create_mutex(&key, &mutex_map)
         };
 
-        let _guard = rc_mutex.mutex.lock();
-        let mut sentinel = Sentinel {
-            mutex_ref: &rc_mutex,
-            map_ref: &mutex_map,
-            canceled: false,
-        };
-
-        let result = task();
-
-        sentinel.canceled = true;
-        rc_mutex.decrement_rc(&mutex_map);
-
-        result
+        let _guard = rc_mutex.lock(&key, &mutex_map);
+        task()
     }
 
     #[inline]
     fn create_mutex<'a>(
-        key: K,
-        map_ref: &'a flurry::HashMapRef<'a, K, ReferenceCountedMutex<K>>,
-    ) -> &'a ReferenceCountedMutex<K> {
+        key: &K,
+        map_ref: &'a flurry::HashMapRef<'a, K, ReferenceCountedMutex>,
+    ) -> &'a ReferenceCountedMutex {
+        let mut mutex = ReferenceCountedMutex::new();
         loop {
-            let key_map = key.clone();
-            let key_mutex = key.clone();
-            match map_ref.try_insert(key_map, ReferenceCountedMutex::new(key_mutex)) {
+            match map_ref.try_insert(key.clone(), mutex) {
                 Ok(mutex_ref) => break mutex_ref,
                 Err(insert_err) => {
                     let curr = insert_err.current;
                     if curr.increment_rc() > 0 {
                         break curr;
+                    } else {
+                        mutex = insert_err.not_inserted;
                     }
                 }
             }
-        }
-    }
-}
-
-/// Type that manages decrementing the reference counter of the [`ReferenceCountedMutex`](struct.ReferenceCountedMutex.html)
-/// if execution of the task panics.
-struct Sentinel<'a, K>
-where
-    K: 'static + Sync + Send + Clone + Hash + Ord,
-{
-    mutex_ref: &'a ReferenceCountedMutex<K>,
-    map_ref: &'a flurry::HashMapRef<'a, K, ReferenceCountedMutex<K>>,
-    canceled: bool,
-}
-
-impl<K> Drop for Sentinel<'_, K>
-where
-    K: 'static + Sync + Send + Clone + Hash + Ord,
-{
-    fn drop(&mut self) {
-        if !self.canceled {
-            self.mutex_ref.decrement_rc(self.map_ref);
         }
     }
 }
@@ -145,25 +113,37 @@ where
 /// decrementing the counter from 1 to 0 and makes sure that the counter cannot be incremented
 /// back up once reaching 0 in case a thread finds a ReferenceCountedMutex that is in the
 /// process of being removed from the map.
-pub struct ReferenceCountedMutex<K>
-where
-    K: 'static + Sync + Send + Clone + Hash + Ord,
-{
-    key: K,
+pub struct ReferenceCountedMutex {
     mutex: parking_lot::Mutex<()>,
     rc: AtomicUsize,
 }
 
-impl<K> ReferenceCountedMutex<K>
-where
-    K: 'static + Sync + Send + Clone + Hash + Ord,
-{
+impl ReferenceCountedMutex {
     /// Create a new ReferenceCountedMutex with an initial reference count of 1.
-    fn new(key: K) -> Self {
+    fn new() -> Self {
         ReferenceCountedMutex {
-            key,
             mutex: parking_lot::Mutex::new(()),
             rc: AtomicUsize::new(1),
+        }
+    }
+
+    /// Requires the lock for the underlying mutex and returns a `ReferenceCountedMutexGuard`
+    /// that additionally calls `decrement_rc` when dropped.
+    fn lock<'a, K>(
+        &'a self,
+        key: &'a K,
+        map: &'a flurry::HashMapRef<'a, K, ReferenceCountedMutex>,
+    ) -> ReferenceCountedMutexGuard<'a, K>
+    where
+        K: 'static + Sync + Send + Clone + Hash + Ord,
+    {
+        let _mutex_guard = self.mutex.lock();
+
+        ReferenceCountedMutexGuard {
+            map,
+            key,
+            mutex: self,
+            _mutex_guard,
         }
     }
 
@@ -199,12 +179,36 @@ where
     /// find this ReferenceCountedMutex in the map after this thread has decremented the rc to 0 but
     /// before this thread removed the element from the map, the other thread will fail to increment
     /// the reference counter and thus has to create a new ReferenceCountedMutex element.
-    fn decrement_rc(&self, map_ref: &flurry::HashMapRef<K, ReferenceCountedMutex<K>>) {
+    fn decrement_rc<K>(&self, key: &K, map_ref: &flurry::HashMapRef<K, ReferenceCountedMutex>)
+    where
+        K: 'static + Sync + Send + Clone + Hash + Ord,
+    {
         let curr = self.rc.fetch_sub(1, Ordering::Relaxed);
 
         if curr == 1 {
-            map_ref.remove(&self.key);
+            map_ref.remove(key);
         }
+    }
+}
+
+/// Wrapper struct containing the actual mutex guard for the underlying Mutex that additionally calls
+/// `ReferenceCountedMutex::decrement_rc` when dropped.
+struct ReferenceCountedMutexGuard<'a, K>
+where
+    K: 'static + Sync + Send + Clone + Hash + Ord,
+{
+    map: &'a flurry::HashMapRef<'a, K, ReferenceCountedMutex>,
+    key: &'a K,
+    mutex: &'a ReferenceCountedMutex,
+    _mutex_guard: parking_lot::MutexGuard<'a, ()>,
+}
+
+impl<K> Drop for ReferenceCountedMutexGuard<'_, K>
+where
+    K: 'static + Sync + Send + Clone + Hash + Ord,
+{
+    fn drop(&mut self) {
+        self.mutex.decrement_rc(self.key, self.map);
     }
 }
 
