@@ -332,11 +332,7 @@ impl<'m, T> ModeCombiner<'m, T> for DelegatingModeCombiner<'m, T> {
     }
 
     fn get_outer(&self) -> Option<&(dyn ModeCombiner<'m, T> + Send + Sync)> {
-        if let Some(ref outer) = self.outer {
-            Some(outer.as_ref())
-        } else {
-            None
-        }
+        self.outer.as_ref().map(|outer| outer.as_ref())
     }
 
     fn set_outer(&mut self, outer: Arc<dyn ModeCombiner<'m, T> + 'm + Send + Sync>) {
