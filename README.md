@@ -10,13 +10,13 @@ tasks based on the value of a key.
 To add exec-rs to your project simply add the following Cargo dependency:
 ```toml
 [dependencies]
-exec-rs = "0.1.0"
+exec-rs = "0.1.2"
 ```
 
 Or to exclude the "sync" feature:
 ```toml
 [dependencies.exec-rs]
-version = "0.1.0"
+version = "0.1.2"
 default-features = false
 ```
 
