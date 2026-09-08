@@ -363,13 +363,8 @@ impl<'a, 'm, T: 'm> Iterator for ModeCombinerIterator<'a, 'm, T> {
 
     fn next(&mut self) -> Option<<Self as Iterator>::Item> {
         if let Some(curr_wrapper) = self.curr_combiner {
-            let curr_outer = curr_wrapper.get_outer();
-
-            if let Some(curr_outer) = curr_outer {
-                self.curr_combiner = Some(curr_outer);
-            } else {
-                return None;
-            }
+            let curr_outer = curr_wrapper.get_outer()?;
+            self.curr_combiner = Some(curr_outer);
         } else {
             self.curr_combiner = Some(self.mode_combiner);
         }
@@ -380,10 +375,10 @@ impl<'a, 'm, T: 'm> Iterator for ModeCombinerIterator<'a, 'm, T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{invoke, BaseInvoker, Invoker, Mode, ModeCombinerIterator, ModeWrapper};
+    use crate::{BaseInvoker, Invoker, Mode, ModeCombinerIterator, ModeWrapper, invoke};
     use std::sync::{
-        atomic::{AtomicU16, Ordering},
         Arc,
+        atomic::{AtomicU16, Ordering},
     };
 
     static PRE_COUNTER: AtomicU16 = AtomicU16::new(1);
@@ -393,11 +388,9 @@ mod tests {
     impl ModeWrapper<'static, i32> for MultiplyTwoMode {
         fn wrap<'f>(
             self: Arc<Self>,
-            task: Box<(dyn FnOnce() -> i32 + 'f)>,
-        ) -> Box<(dyn FnOnce() -> i32 + 'f)> {
-            Box::new(move || {
-                return task() * 2;
-            })
+            task: Box<dyn FnOnce() -> i32 + 'f>,
+        ) -> Box<dyn FnOnce() -> i32 + 'f> {
+            Box::new(move || task() * 2)
         }
     }
 
@@ -405,11 +398,9 @@ mod tests {
     impl ModeWrapper<'static, i32> for AddTwoMode {
         fn wrap<'f>(
             self: Arc<Self>,
-            task: Box<(dyn FnOnce() -> i32 + 'f)>,
-        ) -> Box<(dyn FnOnce() -> i32 + 'f)> {
-            Box::new(move || {
-                return task() + 2;
-            })
+            task: Box<dyn FnOnce() -> i32 + 'f>,
+        ) -> Box<dyn FnOnce() -> i32 + 'f> {
+            Box::new(move || task() + 2)
         }
     }
 
@@ -443,8 +434,8 @@ mod tests {
     impl<'a> ModeWrapper<'a, &'a str> for StringRefMode<'a> {
         fn wrap(
             self: Arc<Self>,
-            task: Box<(dyn FnOnce() -> &'a str + 'a)>,
-        ) -> Box<(dyn FnOnce() -> &'a str + 'a)> {
+            task: Box<dyn FnOnce() -> &'a str + 'a>,
+        ) -> Box<dyn FnOnce() -> &'a str + 'a> {
             Box::new(move || {
                 task();
                 self.str_ref
@@ -458,7 +449,7 @@ mod tests {
             self: Arc<Self>,
             task: Box<dyn FnOnce() -> ModeCombinerIterator<'a, 'm, &'m str> + 'a>,
         ) -> Box<dyn FnOnce() -> ModeCombinerIterator<'a, 'm, &'m str> + 'a> {
-            Box::new(move || task())
+            Box::new(task)
         }
     }
 
@@ -594,13 +585,8 @@ mod tests {
         }
 
         impl ModeWrapper<'static, u16> for MultiplierMode {
-            fn wrap(
-                self: Arc<Self>,
-                task: Box<(dyn FnOnce() -> u16)>,
-            ) -> Box<(dyn FnOnce() -> u16)> {
-                Box::new(move || {
-                    return task() * self.multiplier;
-                })
+            fn wrap(self: Arc<Self>, task: Box<dyn FnOnce() -> u16>) -> Box<dyn FnOnce() -> u16> {
+                Box::new(move || task() * self.multiplier)
             }
         }
 

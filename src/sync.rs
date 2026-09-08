@@ -1,8 +1,8 @@
 use std::{
     hash::Hash,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
@@ -230,10 +230,7 @@ where
     K: 'static + Sync + Send + Clone + Hash + Ord,
     M: std::borrow::Borrow<MutexSync<K>> + 'static,
 {
-    fn wrap<'f>(
-        self: Arc<Self>,
-        task: Box<(dyn FnOnce() -> T + 'f)>,
-    ) -> Box<(dyn FnOnce() -> T + 'f)> {
+    fn wrap<'f>(self: Arc<Self>, task: Box<dyn FnOnce() -> T + 'f>) -> Box<dyn FnOnce() -> T + 'f> {
         Box::new(move || self.mutex_sync.borrow().evaluate(self.key.clone(), task))
     }
 }
@@ -265,8 +262,8 @@ mod tests {
 
     use super::{MutexSync, MutexSyncExecutor};
     use std::sync::{
-        atomic::{AtomicBool, AtomicI32, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicI32, Ordering},
     };
 
     #[test]
@@ -329,7 +326,7 @@ mod tests {
             handle.join().unwrap();
         }
 
-        assert_eq!(failed.load(Ordering::Relaxed), false);
+        assert!(!failed.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -370,7 +367,7 @@ mod tests {
             handle.join().unwrap();
         }
 
-        assert_eq!(failed.load(Ordering::Relaxed), false);
+        assert!(!failed.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -455,7 +452,7 @@ mod tests {
             handle.join().unwrap();
         }
 
-        assert_eq!(failed.load(Ordering::Relaxed), false);
+        assert!(!failed.load(Ordering::Relaxed));
     }
 
     #[test]
