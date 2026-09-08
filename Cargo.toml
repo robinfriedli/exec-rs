@@ -1,8 +1,8 @@
 [package]
 name = "exec-rs"
-version = "0.1.2"
+version = "0.2.0"
 authors = ["robinfriedli <robinfriedli@icloud.com>"]
-edition = "2018"
+edition = "2024"
 license = "Apache-2.0"
 description = "Library that provides utility traits for task execution and, if the sync feature is enabled, the ability to synchronise tasks based on the value of a key."
 repository = "https://github.com/robinfriedli/exec-rs"
@@ -16,9 +16,9 @@ default = ["sync"]
 sync = ["flurry", "parking_lot"]
 
 [dependencies.flurry]
-version = "0.3.1"
+version = "0.5.2"
 optional = true
 
 [dependencies.parking_lot]
-version = "0.11.1"
+version = "0.12.5"
 optional = true
