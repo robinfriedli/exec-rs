@@ -4,16 +4,17 @@ version = "0.2.0"
 authors = ["robinfriedli <robinfriedli@icloud.com>"]
 edition = "2024"
 license = "Apache-2.0"
-description = "Library that provides utility traits for task execution and, if the sync feature is enabled, the ability to synchronise tasks based on the value of a key."
+description = "Library that provides utility traits for task execution and, if the mutex-sync or mutex-async feature is enabled, the ability to synchronise tasks based on key value."
 repository = "https://github.com/robinfriedli/exec-rs"
 homepage = "https://github.com/robinfriedli/exec-rs"
 readme = "README.md"
-keywords = ["exec", "task", "sync"]
+keywords = ["exec", "task", "sync", "mutex"]
 categories = ["rust-patterns", "concurrency"]
 
 [features]
-default = ["sync"]
-sync = ["flurry", "parking_lot"]
+default = ["mutex-sync", "mutex-async"]
+mutex-sync = ["flurry", "parking_lot"]
+mutex-async = ["flurry", "tokio"]
 
 [dependencies.flurry]
 version = "0.5.2"
@@ -22,3 +23,11 @@ optional = true
 [dependencies.parking_lot]
 version = "0.12.5"
 optional = true
+
+[dependencies.tokio]
+version = "1.53.1"
+optional = true
+features = ["sync"]
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "time"] }

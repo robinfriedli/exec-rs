@@ -10,13 +10,13 @@ tasks based on the value of a key.
 To add exec-rs to your project simply add the following Cargo dependency:
 ```toml
 [dependencies]
-exec-rs = "0.1.2"
+exec-rs = "0.2.0"
 ```
 
-Or to exclude the "sync" feature:
+Or to exclude the "mutex-sync" and "mutex-async" features:
 ```toml
 [dependencies.exec-rs]
-version = "0.1.2"
+version = "0.2.0"
 default-features = false
 ```
 
@@ -122,9 +122,9 @@ Trait used to combine `ModeWrappers` by allowing one `ModeWrapper` to delegate t
 iterator that can unwrap combined ModeWrappers. An implementation of this trait is returned by `ModeWrapper::into_combiner`
 which returns a `DelegatingModeCombiner` by default.
 
-## Sync
+## Mutex
 
-The sync module provides the `MutexSync` struct which can be used to execute and synchronise tasks by the value of the
+The mutex module provides the `MutexSync` struct which can be used to execute and synchronise tasks by the value of the
 key provided when submitting a task.
 
 ```rust
@@ -139,9 +139,9 @@ impl<K> MutexSync<K>
 where
     K: 'static + Sync + Send + Clone + Hash + Ord,
 {
-    pub fn new() -> Self;
+    pub fn new() -> Self {}
 
-    pub fn evaluate<R, F: FnOnce() -> R>(&self, key: K, task: F) -> R;
+    pub fn evaluate<R, F: FnOnce() -> R>(&self, key: K, task: F) -> R {}
 }
 ```
 Task executor that can synchronise tasks by value of a key provided when submitting a task.
@@ -153,10 +153,30 @@ Manages a concurrent hash map that maps `ReferenceCountedMutex` elements to the 
 holds a mutex used for synchronisation and removes itself from the map automatically if not used by
 any thread anymore by managing an atomic reference counter. If the counter is decremented from 1 to
 0 the element is removed from the map and the counter cannot be incremented back up again. If the counter
-reached 0 future increments fail and a new `ReferenceCountedMutex` is created instead. When creating
+reached 0, future increments fail and a new `ReferenceCountedMutex` is created instead. When creating
 a new `ReferenceCountedMutex` and inserting it to the map fails because another thread has already
 created an element for the same key, the current thread tries to use the found existing element instead
 as long as its reference counter is valid (greater than 0), else it retries creating the element.
 
 The type of the key used for synchronisation must be able to be used as a key for the map and thus
 must implement `Sync + Send + Clone + Hash + Ord` and have a static lifetime.
+
+```rust
+pub struct MutexAsync<K>
+where
+    K: 'static + Sync + Send + Clone + Hash + Ord,
+{
+    core: MutexCore<K, tokio::sync::Mutex<()>>,
+}
+
+impl<K> MutexAsync<K>
+where
+    K: 'static + Sync + Send + Clone + Hash + Ord,
+{
+    pub fn new() -> Self {}
+
+    pub async fn evaluate<R, F, Fut>(&self, key: K, task: F) -> R {}
+}
+```
+
+Async alternative to MutexSync that uses an async tokio Mutex instead of a parking_lot Mutex.

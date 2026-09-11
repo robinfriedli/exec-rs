@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-#[cfg(feature = "sync")]
-pub mod sync;
+#[cfg(any(feature = "mutex-sync", feature = "mutex-async"))]
+pub mod mutex;
 
 /// Function that implements using a reference to a [`Mode`](struct.Mode.html) to invoke a task.
 ///
